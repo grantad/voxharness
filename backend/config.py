@@ -33,6 +33,11 @@ class Config:
     vad_threshold: float = 0.5
     silence_duration_ms: int = 400  # ms of silence to end a turn
 
+    # Wake word
+    listen_mode: str = "wake_word"  # "wake_word", "push_to_talk", "always_on"
+    wake_word: str = "hey_jarvis_v0.1"  # model name or friendly name like "jarvis"
+    wake_word_threshold: float = 0.5
+
     # System prompt
     system_prompt: str = (
         "You are a voice assistant. Reply conversationally in short, clear sentences. "
@@ -57,5 +62,8 @@ class Config:
             sample_rate=int(os.getenv("SAMPLE_RATE", str(cls.sample_rate))),
             vad_threshold=float(os.getenv("VAD_THRESHOLD", str(cls.vad_threshold))),
             silence_duration_ms=int(os.getenv("SILENCE_DURATION_MS", str(cls.silence_duration_ms))),
+            listen_mode=os.getenv("LISTEN_MODE", cls.listen_mode),
+            wake_word=os.getenv("WAKE_WORD", cls.wake_word),
+            wake_word_threshold=float(os.getenv("WAKE_WORD_THRESHOLD", str(cls.wake_word_threshold))),
             system_prompt=os.getenv("SYSTEM_PROMPT", cls.system_prompt),
         )

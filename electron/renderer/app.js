@@ -11,6 +11,7 @@ let ttsChunks = [];          // accumulate all MP3 chunks per utterance
 let ttsPlaying = false;
 let currentTTSSource = null;
 let ttsPlaybackQueue = [];   // queue of complete MP3 buffers to play sequentially
+let listenMode = 'push_to_talk';  // from server: "wake_word", "push_to_talk", "always_on"
 let currentAssistantEl = null;
 const waveform = new WaveformVisualizer('waveform');
 
@@ -69,10 +70,25 @@ function handleMessage(msg) {
   switch (msg.type) {
     case 'ready':
       providerLabel.textContent = msg.provider || '--';
-      addSystemMessage('Connected. Hold the mic button and speak, or type a message.');
+      listenMode = msg.listen_mode || 'push_to_talk';
+      if (listenMode === 'wake_word') {
+        addSystemMessage(`Connected. Say "${msg.wake_word || 'hey jarvis'}" to start talking, or type a message.`);
+        micBtn.textContent = 'Always Listening';
+        // Auto-start mic for wake word mode
+        startMic();
+      } else {
+        addSystemMessage('Connected. Hold the mic button and speak, or type a message.');
+      }
+      break;
+
+    case 'wake_word_detected':
+      addSystemMessage('Wake word detected! Listening...');
+      micIndicator.className = 'indicator active';
+      micLabel.textContent = 'Listening';
       break;
 
     case 'final_transcript':
+      currentAssistantEl = null;  // reset so next assistant response is a new bubble
       addMessage('user', msg.text);
       break;
 
@@ -95,7 +111,7 @@ function handleMessage(msg) {
       break;
 
     case 'tool_call':
-      handleToolCall(msg.name, msg.args);
+      handleToolCall(msg.name, msg.args, msg.resolved);
       break;
 
     case 'status':
@@ -104,6 +120,15 @@ function handleMessage(msg) {
       } else if (msg.state === 'provider_switched') {
         providerLabel.textContent = msg.provider;
         addSystemMessage(`Switched to ${msg.provider}`);
+      } else if (msg.state === 'listening') {
+        micIndicator.className = 'indicator active';
+        micLabel.textContent = 'Listening';
+      } else if (msg.state === 'waiting_for_wake_word') {
+        micIndicator.className = 'indicator on';
+        micLabel.textContent = 'Waiting for wake word';
+      } else if (msg.state === 'mode_changed') {
+        listenMode = msg.listen_mode;
+        addSystemMessage(`Mode: ${msg.listen_mode}`);
       }
       break;
 
@@ -302,6 +327,10 @@ async function startMic() {
 
 function stopMic() {
   if (!isRecording) return;
+
+  // In wake_word mode, mic stays on — don't stop it
+  if (listenMode === 'wake_word') return;
+
   isRecording = false;
   console.log(`Recording stopped after ${framesSent} frames`);
 
@@ -388,39 +417,52 @@ function cancelTTS() {
 }
 
 // --- Music Playback ---
-let musicAudio = null;  // HTML5 Audio element for music
-let musicGain = null;
+let musicAudio = null;
 
-function playMusic(track, volume = 0.7) {
-  stopMusic();
+function playMusicFromUrl(title, url, volume = 0.7) {
+  stopMusic(true);  // silent stop
 
-  // Search for the track on a free music API and play it
-  // For now, use a text-to-speech workaround: the LLM says what it's playing,
-  // and we search YouTube-free sources. As a placeholder, we'll use the
-  // browser's speech synthesis to acknowledge.
-  // TODO: Integrate with a real music service (Spotify API, YouTube, etc.)
+  musicAudio = new Audio();
+  musicAudio.crossOrigin = 'anonymous';
+  musicAudio.volume = volume;
+  musicAudio.src = url;
 
-  addSystemMessage(`Now playing: ${track}`);
-  console.log(`Music requested: "${track}" at volume ${volume}`);
+  musicAudio.onplay = () => {
+    console.log(`Music playing: ${title}`);
+    addSystemMessage(`Now playing: ${title}`);
+  };
+  musicAudio.onerror = (e) => {
+    console.error('Music playback error:', e);
+    addSystemMessage(`Failed to play: ${title}`);
+  };
+  musicAudio.onended = () => {
+    console.log('Music ended');
+  };
 
-  // Try to search and play from freesound.org or similar
-  // For MVP, acknowledge the request - real music integration coming in Phase 2
+  musicAudio.play().catch(err => {
+    console.error('Music play() failed:', err);
+    addSystemMessage(`Playback blocked: ${err.message}`);
+  });
 }
 
-function stopMusic() {
+function stopMusic(silent = false) {
   if (musicAudio) {
     musicAudio.pause();
     musicAudio.src = '';
     musicAudio = null;
-    addSystemMessage('Music stopped');
+    if (!silent) addSystemMessage('Music stopped');
   }
 }
 
 // --- Tool Calls ---
-function handleToolCall(name, args) {
+function handleToolCall(name, args, resolved) {
   switch (name) {
     case 'play_music':
-      playMusic(args.track || 'music', args.volume || 0.7);
+      if (resolved && resolved.url) {
+        playMusicFromUrl(resolved.title || args.track, resolved.url, args.volume || 0.7);
+      } else {
+        addSystemMessage(`Could not find: ${args.track || 'music'}`);
+      }
       break;
     case 'stop_music':
       stopMusic();
@@ -436,14 +478,26 @@ function handleToolCall(name, args) {
 
 // --- Event Listeners ---
 
-// Push-to-talk
-micBtn.addEventListener('mousedown', () => startMic());
-micBtn.addEventListener('mouseup', () => stopMic());
-micBtn.addEventListener('mouseleave', () => stopMic());
+// Push-to-talk (only in PTT mode)
+micBtn.addEventListener('mousedown', () => {
+  if (listenMode === 'push_to_talk') startMic();
+});
+micBtn.addEventListener('mouseup', () => {
+  if (listenMode === 'push_to_talk') stopMic();
+});
+micBtn.addEventListener('mouseleave', () => {
+  if (listenMode === 'push_to_talk') stopMic();
+});
 
 // Touch support
-micBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startMic(); });
-micBtn.addEventListener('touchend', (e) => { e.preventDefault(); stopMic(); });
+micBtn.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  if (listenMode === 'push_to_talk') startMic();
+});
+micBtn.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  if (listenMode === 'push_to_talk') stopMic();
+});
 
 // Text input
 sendBtn.addEventListener('click', sendText);

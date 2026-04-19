@@ -31,6 +31,7 @@ class Conversation:
         on_send: Callable[[dict], Awaitable[None]] | None = None,
         tools: list[ToolDef] | None = None,
         tool_handler: Callable[[str, dict], Awaitable[str]] | None = None,
+        on_turn_complete: Callable[[], Awaitable[None]] | None = None,
     ):
         self.vad = vad
         self.stt = stt
@@ -40,6 +41,7 @@ class Conversation:
         self.on_send = on_send  # send JSON message to client
         self.tools = tools
         self.tool_handler = tool_handler
+        self.on_turn_complete = on_turn_complete
 
         self.messages: list[Message] = []
         self._cancel_event = asyncio.Event()
@@ -99,6 +101,10 @@ class Conversation:
         self.messages.append(Message(role="user", content=user_text))
 
         await self._run_llm_turn()
+
+        # Signal turn is complete (for wake word mode to go back to listening)
+        if self.on_turn_complete:
+            await self.on_turn_complete()
 
     async def _run_llm_turn(self):
         """Run LLM and handle response (may recurse for tool calls)."""
@@ -168,19 +174,24 @@ class Conversation:
                     if self._cancel_event.is_set():
                         break
 
-                    await self._send({
-                        "type": "tool_call",
-                        "name": tc.name,
-                        "args": json.loads(tc.arguments),
-                    })
+                    tool_args = json.loads(tc.arguments)
 
-                    # Execute tool
+                    # Execute tool (may resolve URLs etc)
                     try:
-                        result = await self.tool_handler(
-                            tc.name, json.loads(tc.arguments)
-                        )
+                        result = await self.tool_handler(tc.name, tool_args)
                     except Exception as e:
                         result = f"Error: {e}"
+
+                    # Forward tool call to client with any resolved data
+                    event_data = {
+                        "type": "tool_call",
+                        "name": tc.name,
+                        "args": tool_args,
+                    }
+                    # Include resolved music URL if available
+                    if "_resolved" in tool_args:
+                        event_data["resolved"] = tool_args.pop("_resolved")
+                    await self._send(event_data)
 
                     self.messages.append(Message(
                         role="tool",

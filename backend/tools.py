@@ -1,18 +1,25 @@
 """Tool definitions and handlers for the LLM to invoke."""
 
+import logging
 from llm.base import ToolDef
+from music import MusicService
+
+logger = logging.getLogger(__name__)
+
+# Shared music service instance
+_music_service = MusicService()
 
 # Tool definitions exposed to the LLM
 TOOLS = [
     ToolDef(
         name="play_music",
-        description="Play a music track or genre. Use when the user asks to play music.",
+        description="Play a music track, song, or genre. Searches YouTube for the track and streams it. Use when the user asks to play music, a song, or any audio content.",
         parameters={
             "type": "object",
             "properties": {
                 "track": {
                     "type": "string",
-                    "description": "Track name, genre, or description (e.g. 'lo-fi beats', 'jazz')",
+                    "description": "Track name, artist, song title, or search query (e.g. 'He Has Risen hymn', 'lo-fi beats', 'Mozart Symphony 40')",
                 },
                 "volume": {
                     "type": "number",
@@ -60,11 +67,19 @@ TOOLS = [
 async def handle_tool(name: str, args: dict) -> str:
     """Execute a tool call and return result string.
 
-    Most tools are forwarded to the client via WebSocket (handled in server.py).
-    This handler returns confirmation messages for the LLM.
+    For play_music, searches YouTube and returns the stream URL
+    which gets forwarded to the client for playback.
     """
     if name == "play_music":
-        return f"Now playing: {args.get('track', 'music')}"
+        query = args.get("track", "music")
+        logger.info(f"Searching for music: {query}")
+        result = await _music_service.get_stream_url(query)
+        if result:
+            # Store the result so it can be forwarded with the tool_call event
+            args["_resolved"] = result
+            return f"Now playing: {result['title']}"
+        else:
+            return f"Could not find music for: {query}"
     elif name == "stop_music":
         return "Music stopped."
     elif name == "play_sfx":

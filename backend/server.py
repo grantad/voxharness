@@ -12,6 +12,7 @@ from stt import STT
 from tools import TOOLS, handle_tool
 from tts import TTS
 from vad import VAD
+from wakeword import WakeWordDetector
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,10 @@ class Session:
     def __init__(self, ws: ServerConnection, config: Config, stt: STT, llm: LLMRouter):
         self.ws = ws
         self.config = config
+        self.listen_mode = config.listen_mode  # "wake_word", "push_to_talk", "always_on"
+
+        # Listening state for wake_word mode
+        self._actively_listening = False
 
         # Create per-session VAD (has internal state)
         self.vad = VAD(
@@ -30,7 +35,13 @@ class Session:
             silence_duration_ms=config.silence_duration_ms,
         )
 
-        # TTS client (stateless, safe to share but cheap to create)
+        # Wake word detector
+        self.wake_word = WakeWordDetector(
+            wake_word=config.wake_word,
+            threshold=config.wake_word_threshold,
+        )
+
+        # TTS client
         self.tts = TTS(
             api_key=config.elevenlabs_api_key,
             voice_id=config.elevenlabs_voice_id,
@@ -46,6 +57,7 @@ class Session:
             on_send=self._send,
             tools=TOOLS,
             tool_handler=handle_tool,
+            on_turn_complete=self._on_turn_complete,
         )
 
     async def _send(self, msg):
@@ -58,32 +70,69 @@ class Session:
         except Exception as e:
             logger.warning(f"Failed to send to client: {e}")
 
+    async def _on_wake_word_detected(self):
+        """Called when wake word is detected."""
+        if self._actively_listening:
+            return  # already listening
+
+        self._actively_listening = True
+        logger.info("Wake word detected — now listening")
+        await self._send({"type": "wake_word_detected"})
+        await self._send({"type": "status", "state": "listening"})
+
+    async def _on_turn_complete(self):
+        """Called when a conversation turn finishes (TTS done)."""
+        if self.listen_mode == "wake_word":
+            self._actively_listening = False
+            self.vad.reset()
+            logger.info("Turn complete — waiting for wake word")
+            await self._send({"type": "status", "state": "waiting_for_wake_word"})
+
     async def run(self):
         """Handle the WebSocket connection lifecycle."""
-        # Load VAD model for this session
+        # Load models
         await self.vad.load()
+        if self.listen_mode == "wake_word":
+            await self.wake_word.load()
+            self.wake_word.on_wake(self._on_wake_word_detected)
         await self.conversation.start()
 
-        logger.info(f"Session started: {self.ws.remote_address}")
-        await self._send({"type": "ready", "provider": self.conversation.llm.active_name})
+        logger.info(f"Session started: {self.ws.remote_address} (mode={self.listen_mode})")
+        await self._send({
+            "type": "ready",
+            "provider": self.conversation.llm.active_name,
+            "listen_mode": self.listen_mode,
+            "wake_word": self.config.wake_word,
+        })
 
-        audio_bytes_received = 0
         try:
             async for message in self.ws:
                 if isinstance(message, bytes):
-                    # Binary = PCM audio from mic
-                    audio_bytes_received += len(message)
-                    if audio_bytes_received % 32000 < len(message):  # log every ~1s of audio
-                        logger.debug(f"Audio received: {audio_bytes_received} bytes total")
-                    await self.conversation.feed_audio(message)
+                    await self._handle_audio(message)
                 else:
-                    # JSON = control messages
                     data = json.loads(message)
                     await self._handle_command(data)
         except Exception as e:
             logger.error(f"Session error: {e}", exc_info=True)
         finally:
             logger.info(f"Session ended: {self.ws.remote_address}")
+
+    async def _handle_audio(self, pcm_bytes: bytes):
+        """Route audio to wake word detector and/or VAD based on mode."""
+        if self.listen_mode == "wake_word":
+            # Always feed wake word detector
+            await self.wake_word.feed(pcm_bytes)
+
+            # Only feed VAD when actively listening (after wake word)
+            if self._actively_listening:
+                await self.conversation.feed_audio(pcm_bytes)
+
+        elif self.listen_mode == "always_on":
+            await self.conversation.feed_audio(pcm_bytes)
+
+        elif self.listen_mode == "push_to_talk":
+            # PTT mode — audio only flows when client is recording
+            await self.conversation.feed_audio(pcm_bytes)
 
     async def _handle_command(self, data: dict):
         """Handle JSON commands from the client."""
@@ -93,16 +142,13 @@ class Session:
             logger.info(f"Client hello: {data}")
 
         elif msg_type == "barge_in":
-            # Client-side barge-in detection
             self.conversation._cancel_event.set()
             await self._send({"type": "cancel"})
 
         elif msg_type == "ptt_release":
-            # Push-to-talk released — flush any buffered audio through VAD
             await self.conversation.flush_audio()
 
         elif msg_type == "text_input":
-            # Typed text (bypass STT)
             text = data.get("text", "").strip()
             if text:
                 await self.conversation.handle_text_input(text)
@@ -120,6 +166,18 @@ class Session:
             except ValueError as e:
                 await self._send({"type": "error", "message": str(e)})
 
+        elif msg_type == "set_listen_mode":
+            mode = data.get("mode", "")
+            if mode in ("wake_word", "push_to_talk", "always_on"):
+                self.listen_mode = mode
+                self._actively_listening = (mode != "wake_word")
+                logger.info(f"Listen mode changed to: {mode}")
+                await self._send({
+                    "type": "status",
+                    "state": "mode_changed",
+                    "listen_mode": mode,
+                })
+
         else:
             logger.warning(f"Unknown command type: {msg_type}")
 
@@ -134,7 +192,6 @@ class Server:
 
     async def start(self):
         """Initialize shared resources and start the WebSocket server."""
-        # Load STT model (shared across sessions)
         logger.info(f"Loading Whisper model: {self.config.whisper_model}")
         self._stt = STT(
             model_size=self.config.whisper_model,
@@ -143,19 +200,18 @@ class Server:
         await self._stt.load()
         logger.info("Whisper model loaded")
 
-        # Initialize LLM router (shared across sessions)
         self._llm = LLMRouter.from_config(self.config)
         logger.info(f"LLM router ready, active provider: {self._llm.active_name}")
 
-        # Start WebSocket server
         logger.info(f"Starting WebSocket server on {self.config.ws_host}:{self.config.ws_port}")
+        logger.info(f"Listen mode: {self.config.listen_mode}, wake word: {self.config.wake_word}")
         async with serve(
             self._handle_connection,
             self.config.ws_host,
             self.config.ws_port,
         ) as server:
             print(f"READY ws://{self.config.ws_host}:{self.config.ws_port}", flush=True)
-            await asyncio.Future()  # run forever
+            await asyncio.Future()
 
     async def _handle_connection(self, ws: ServerConnection):
         """Handle a new WebSocket connection."""

@@ -13,6 +13,8 @@ dependencies = [
     "python-dotenv>=1.0",
     "numpy>=1.26",
     "soundfile>=0.12",
+    "yt-dlp>=2024.0",
+    "openwakeword>=0.6",
 ]
 
 [project.scripts]
@@ -22,7 +24,7 @@ voxharness = "main:main"
 include = ["llm*"]
 
 [tool.setuptools]
-py-modules = ["main", "server", "config", "vad", "stt", "tts", "conversation", "tools"]
+py-modules = ["main", "server", "config", "vad", "stt", "tts", "conversation", "tools", "music", "wakeword"]
 
 [build-system]
 requires = ["setuptools>=68"]
