@@ -97,6 +97,20 @@ class VAD:
                         if self._on_event:
                             await self._on_event(VADEvent(kind="speech_end", audio=audio))
 
+    async def flush(self):
+        """Force-end the current speech segment (called on PTT release)."""
+        if self._is_speaking and self._audio_buffer:
+            self._is_speaking = False
+            audio = bytes(self._audio_buffer)
+            self._audio_buffer = bytearray()
+            self._silence_frames = 0
+            self._pending_frames = bytearray()
+            if self._on_event:
+                await self._on_event(VADEvent(kind="speech_end", audio=audio))
+        else:
+            # Not speaking but may have pending frames — clear them
+            self._pending_frames = bytearray()
+
     def reset(self):
         """Reset VAD state for a new session."""
         self._is_speaking = False

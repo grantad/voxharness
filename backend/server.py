@@ -97,6 +97,10 @@ class Session:
             self.conversation._cancel_event.set()
             await self._send({"type": "cancel"})
 
+        elif msg_type == "ptt_release":
+            # Push-to-talk released — flush any buffered audio through VAD
+            await self.conversation.flush_audio()
+
         elif msg_type == "text_input":
             # Typed text (bypass STT)
             text = data.get("text", "").strip()

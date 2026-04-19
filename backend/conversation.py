@@ -59,6 +59,11 @@ class Conversation:
         """Handle typed text input (bypass STT)."""
         await self._process_turn(text)
 
+    async def flush_audio(self):
+        """Flush any buffered audio (called on PTT release)."""
+        logger.info("PTT released, flushing audio buffer")
+        await self.vad.flush()
+
     async def _on_vad_event(self, event: VADEvent):
         """Handle VAD speech start/end events."""
         if event.kind == "speech_start":

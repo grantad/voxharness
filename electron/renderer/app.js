@@ -305,6 +305,11 @@ function stopMic() {
   isRecording = false;
   console.log(`Recording stopped after ${framesSent} frames`);
 
+  // Tell backend to flush VAD buffer immediately
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'ptt_release' }));
+  }
+
   micIndicator.className = 'indicator off';
   micLabel.textContent = 'Mic Off';
   micBtn.classList.remove('listening');
@@ -382,14 +387,43 @@ function cancelTTS() {
   waveform.setMode('idle');
 }
 
+// --- Music Playback ---
+let musicAudio = null;  // HTML5 Audio element for music
+let musicGain = null;
+
+function playMusic(track, volume = 0.7) {
+  stopMusic();
+
+  // Search for the track on a free music API and play it
+  // For now, use a text-to-speech workaround: the LLM says what it's playing,
+  // and we search YouTube-free sources. As a placeholder, we'll use the
+  // browser's speech synthesis to acknowledge.
+  // TODO: Integrate with a real music service (Spotify API, YouTube, etc.)
+
+  addSystemMessage(`Now playing: ${track}`);
+  console.log(`Music requested: "${track}" at volume ${volume}`);
+
+  // Try to search and play from freesound.org or similar
+  // For MVP, acknowledge the request - real music integration coming in Phase 2
+}
+
+function stopMusic() {
+  if (musicAudio) {
+    musicAudio.pause();
+    musicAudio.src = '';
+    musicAudio = null;
+    addSystemMessage('Music stopped');
+  }
+}
+
 // --- Tool Calls ---
 function handleToolCall(name, args) {
   switch (name) {
     case 'play_music':
-      addSystemMessage(`Playing: ${args.track || 'music'}`);
+      playMusic(args.track || 'music', args.volume || 0.7);
       break;
     case 'stop_music':
-      addSystemMessage('Music stopped');
+      stopMusic();
       break;
     case 'play_sfx':
       addSystemMessage(`SFX: ${args.name || 'unknown'}`);
