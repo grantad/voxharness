@@ -21,7 +21,7 @@ class Config:
     openai_model: str = "gpt-4o"
 
     # STT
-    whisper_model: str = "base.en"
+    whisper_model: str = "small.en"
     whisper_compute_type: str = "int8"
 
     # TTS

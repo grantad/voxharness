@@ -126,15 +126,14 @@ class Conversation:
 
         Rules:
         1. Every assistant message with tool_calls must be immediately followed
-           by tool_result messages for ALL of those tool_call IDs.
-        2. Every tool_result must reference a tool_call ID from the immediately
-           preceding assistant message.
+           by exactly one tool_result per tool_call ID.
+        2. No duplicate tool_results for the same ID.
         3. No orphaned tool_results.
+        4. Tool results must only reference IDs from the preceding assistant message.
         """
         if not self.messages:
             return False
 
-        # Build a clean message list
         clean = []
         i = 0
         repaired = False
@@ -143,16 +142,29 @@ class Conversation:
             msg = self.messages[i]
 
             if msg.role == "tool":
-                # Check if this tool result has a matching tool_use in the previous message
-                if clean and clean[-1].role == "assistant" and clean[-1].tool_calls:
+                # Tool results outside of a tool_call block — orphaned
+                if clean and clean[-1].role == "tool":
+                    # Check if it belongs to the assistant message before the tool results
+                    # Find the assistant message
+                    asst_idx = len(clean) - 1
+                    while asst_idx >= 0 and clean[asst_idx].role == "tool":
+                        asst_idx -= 1
+                    if asst_idx >= 0 and clean[asst_idx].role == "assistant" and clean[asst_idx].tool_calls:
+                        valid_ids = {tc["id"] for tc in clean[asst_idx].tool_calls}
+                        already_added = {m.tool_call_id for m in clean[asst_idx+1:] if m.role == "tool"}
+                        if msg.tool_call_id in valid_ids and msg.tool_call_id not in already_added:
+                            clean.append(msg)
+                        else:
+                            repaired = True
+                    else:
+                        repaired = True
+                elif clean and clean[-1].role == "assistant" and clean[-1].tool_calls:
                     valid_ids = {tc["id"] for tc in clean[-1].tool_calls}
                     if msg.tool_call_id in valid_ids:
                         clean.append(msg)
                     else:
-                        logger.warning(f"Removing orphaned tool_result: {msg.tool_call_id}")
                         repaired = True
                 else:
-                    logger.warning(f"Removing orphaned tool_result (no preceding tool_use): {msg.tool_call_id}")
                     repaired = True
                 i += 1
                 continue
@@ -161,30 +173,27 @@ class Conversation:
                 clean.append(msg)
                 i += 1
 
-                # Collect all tool results that follow
+                # Collect tool results, deduplicating by ID
                 needed_ids = {tc["id"] for tc in msg.tool_calls}
                 found_ids = set()
                 while i < len(self.messages) and self.messages[i].role == "tool":
                     tool_msg = self.messages[i]
-                    if tool_msg.tool_call_id in needed_ids:
+                    if tool_msg.tool_call_id in needed_ids and tool_msg.tool_call_id not in found_ids:
                         clean.append(tool_msg)
                         found_ids.add(tool_msg.tool_call_id)
                     else:
-                        logger.warning(f"Removing mismatched tool_result: {tool_msg.tool_call_id}")
-                        repaired = True
+                        repaired = True  # duplicate or mismatched — skip
                     i += 1
 
-                # Add placeholder results for any missing
-                missing = needed_ids - found_ids
+                # Add placeholders for missing
                 for tc in msg.tool_calls:
-                    if tc["id"] in missing:
+                    if tc["id"] not in found_ids:
                         clean.append(Message(
                             role="tool",
                             content="[cancelled]",
                             tool_call_id=tc["id"],
                         ))
                         repaired = True
-                        logger.warning(f"Added missing tool_result for: {tc['id']}")
                 continue
 
             clean.append(msg)
