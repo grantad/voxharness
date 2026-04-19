@@ -122,40 +122,78 @@ class Conversation:
             await self.on_turn_complete()
 
     def _repair_history(self):
-        """Ensure conversation history is valid for the API.
+        """Ensure conversation history is valid for the Claude API.
 
-        Every assistant message with tool_calls must be followed by
-        matching tool_result messages. If not, add placeholder results.
+        Rules:
+        1. Every assistant message with tool_calls must be immediately followed
+           by tool_result messages for ALL of those tool_call IDs.
+        2. Every tool_result must reference a tool_call ID from the immediately
+           preceding assistant message.
+        3. No orphaned tool_results.
         """
-        repaired = False
+        if not self.messages:
+            return False
+
+        # Build a clean message list
+        clean = []
         i = 0
+        repaired = False
+
         while i < len(self.messages):
             msg = self.messages[i]
+
+            if msg.role == "tool":
+                # Check if this tool result has a matching tool_use in the previous message
+                if clean and clean[-1].role == "assistant" and clean[-1].tool_calls:
+                    valid_ids = {tc["id"] for tc in clean[-1].tool_calls}
+                    if msg.tool_call_id in valid_ids:
+                        clean.append(msg)
+                    else:
+                        logger.warning(f"Removing orphaned tool_result: {msg.tool_call_id}")
+                        repaired = True
+                else:
+                    logger.warning(f"Removing orphaned tool_result (no preceding tool_use): {msg.tool_call_id}")
+                    repaired = True
+                i += 1
+                continue
+
             if msg.role == "assistant" and msg.tool_calls:
-                # Check that every tool_call has a matching tool_result after it
+                clean.append(msg)
+                i += 1
+
+                # Collect all tool results that follow
                 needed_ids = {tc["id"] for tc in msg.tool_calls}
                 found_ids = set()
-                j = i + 1
-                while j < len(self.messages) and self.messages[j].role == "tool":
-                    if self.messages[j].tool_call_id in needed_ids:
-                        found_ids.add(self.messages[j].tool_call_id)
-                    j += 1
+                while i < len(self.messages) and self.messages[i].role == "tool":
+                    tool_msg = self.messages[i]
+                    if tool_msg.tool_call_id in needed_ids:
+                        clean.append(tool_msg)
+                        found_ids.add(tool_msg.tool_call_id)
+                    else:
+                        logger.warning(f"Removing mismatched tool_result: {tool_msg.tool_call_id}")
+                        repaired = True
+                    i += 1
 
+                # Add placeholder results for any missing
                 missing = needed_ids - found_ids
-                if missing:
-                    # Insert placeholder tool results for missing ones
-                    insert_at = i + 1
-                    for tc in msg.tool_calls:
-                        if tc["id"] in missing:
-                            self.messages.insert(insert_at, Message(
-                                role="tool",
-                                content="[cancelled]",
-                                tool_call_id=tc["id"],
-                            ))
-                            insert_at += 1
-                    repaired = True
-                    logger.warning(f"Repaired history: added {len(missing)} missing tool_result(s)")
+                for tc in msg.tool_calls:
+                    if tc["id"] in missing:
+                        clean.append(Message(
+                            role="tool",
+                            content="[cancelled]",
+                            tool_call_id=tc["id"],
+                        ))
+                        repaired = True
+                        logger.warning(f"Added missing tool_result for: {tc['id']}")
+                continue
+
+            clean.append(msg)
             i += 1
+
+        if repaired:
+            self.messages[:] = clean
+            logger.info(f"History repaired: {len(self.messages)} messages")
+
         return repaired
 
     async def _run_llm_turn(self):
