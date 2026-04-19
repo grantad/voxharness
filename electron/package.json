@@ -1,0 +1,14 @@
+{
+  "name": "voxharness",
+  "version": "0.1.0",
+  "description": "Voice-first AI harness",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev"
+  },
+  "dependencies": {
+    "electron": "^33.0.0"
+  },
+  "devDependencies": {}
+}

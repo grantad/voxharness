@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VoxHarness</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Status bar -->
+    <header id="status-bar">
+      <div id="mic-status" class="status-item">
+        <span id="mic-indicator" class="indicator off"></span>
+        <span id="mic-label">Mic Off</span>
+      </div>
+      <div id="connection-status" class="status-item">
+        <span id="conn-indicator" class="indicator off"></span>
+        <span id="conn-label">Disconnected</span>
+      </div>
+      <div id="provider-status" class="status-item">
+        <span id="provider-label">--</span>
+      </div>
+    </header>
+
+    <!-- Main conversation area -->
+    <main id="conversation">
+      <div id="messages"></div>
+    </main>
+
+    <!-- Visuals panel (for tool_call show_text_card, waveform) -->
+    <aside id="visuals-panel" class="hidden">
+      <div id="card-display"></div>
+    </aside>
+
+    <!-- Waveform / avatar -->
+    <div id="waveform-container">
+      <canvas id="waveform" width="800" height="100"></canvas>
+    </div>
+
+    <!-- Controls -->
+    <footer id="controls">
+      <button id="mic-btn" class="control-btn">Hold to Talk</button>
+      <input type="text" id="text-input" placeholder="Type a message..." />
+      <button id="send-btn" class="control-btn">Send</button>
+    </footer>
+  </div>
+
+  <script src="visuals.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
