@@ -27,6 +27,8 @@ class Session:
 
         # Listening state for wake_word mode
         self._actively_listening = False
+        self._conversation_timeout_task: asyncio.Task | None = None
+        self._conversation_timeout_sec = 30  # stay listening for 30s after response
 
         # Create per-session VAD (has internal state)
         self.vad = VAD(
@@ -75,6 +77,11 @@ class Session:
         if self._actively_listening:
             return  # already listening
 
+        # Cancel any pending timeout
+        if self._conversation_timeout_task:
+            self._conversation_timeout_task.cancel()
+            self._conversation_timeout_task = None
+
         self._actively_listening = True
         logger.info("Wake word detected — now listening")
         await self._send({"type": "wake_word_detected"})
@@ -83,10 +90,26 @@ class Session:
     async def _on_turn_complete(self):
         """Called when a conversation turn finishes (TTS done)."""
         if self.listen_mode == "wake_word":
+            # Stay listening for follow-ups — start a timeout
+            # If no new speech within timeout, go back to wake word mode
+            if self._conversation_timeout_task:
+                self._conversation_timeout_task.cancel()
+            self._conversation_timeout_task = asyncio.create_task(
+                self._conversation_timeout()
+            )
+            logger.info(f"Turn complete — listening for {self._conversation_timeout_sec}s more")
+            await self._send({"type": "status", "state": "listening"})
+
+    async def _conversation_timeout(self):
+        """After N seconds of no new speech, go back to wake word mode."""
+        try:
+            await asyncio.sleep(self._conversation_timeout_sec)
             self._actively_listening = False
             self.vad.reset()
-            logger.info("Turn complete — waiting for wake word")
+            logger.info("Conversation timeout — waiting for wake word")
             await self._send({"type": "status", "state": "waiting_for_wake_word"})
+        except asyncio.CancelledError:
+            pass  # new turn started, timeout cancelled
 
     async def run(self):
         """Handle the WebSocket connection lifecycle."""

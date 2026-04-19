@@ -3,14 +3,15 @@
 import logging
 from llm.base import ToolDef
 from music import MusicService
+from system_tools import SYSTEM_TOOLS, handle_system_tool
 
 logger = logging.getLogger(__name__)
 
 # Shared music service instance
 _music_service = MusicService()
 
-# Tool definitions exposed to the LLM
-TOOLS = [
+# Media tool definitions
+MEDIA_TOOLS = [
     ToolDef(
         name="play_music",
         description="Play a music track, song, or genre. Searches YouTube for the track and streams it. Use when the user asks to play music, a song, or any audio content.",
@@ -63,19 +64,26 @@ TOOLS = [
     ),
 ]
 
+# All tools combined
+TOOLS = MEDIA_TOOLS + SYSTEM_TOOLS
+
+# Names of system tools for routing
+_SYSTEM_TOOL_NAMES = {t.name for t in SYSTEM_TOOLS}
+
 
 async def handle_tool(name: str, args: dict) -> str:
-    """Execute a tool call and return result string.
+    """Execute a tool call and return result string."""
 
-    For play_music, searches YouTube and returns the stream URL
-    which gets forwarded to the client for playback.
-    """
+    # Route to system tool handler
+    if name in _SYSTEM_TOOL_NAMES:
+        return await handle_system_tool(name, args)
+
+    # Media tools
     if name == "play_music":
         query = args.get("track", "music")
         logger.info(f"Searching for music: {query}")
         result = await _music_service.get_stream_url(query)
         if result:
-            # Store the result so it can be forwarded with the tool_call event
             args["_resolved"] = result
             return f"Now playing: {result['title']}"
         else:

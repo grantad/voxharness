@@ -24,7 +24,7 @@ voxharness = "main:main"
 include = ["llm*"]
 
 [tool.setuptools]
-py-modules = ["main", "server", "config", "vad", "stt", "tts", "conversation", "tools", "music", "wakeword"]
+py-modules = ["main", "server", "config", "vad", "stt", "tts", "conversation", "tools", "music", "wakeword", "system_tools"]
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -473,6 +473,27 @@ function handleToolCall(name, args, resolved) {
     case 'show_text_card':
       showCard(args.title || '', args.body || '');
       break;
+    // System tools — show what's happening
+    case 'run_command':
+      addSystemMessage(`$ ${args.command || '...'}`);
+      break;
+    case 'write_file':
+      addSystemMessage(`Writing: ${args.path || '...'}`);
+      break;
+    case 'edit_file':
+      addSystemMessage(`Editing: ${args.path || '...'}`);
+      break;
+    case 'read_file':
+      addSystemMessage(`Reading: ${args.path || '...'}`);
+      break;
+    case 'create_cron_job':
+      addSystemMessage(`Cron: ${args.schedule || ''} ${args.command || ''}`);
+      break;
+    case 'search_files':
+      addSystemMessage(`Searching: ${args.pattern || '...'}`);
+      break;
+    default:
+      console.log(`Tool call: ${name}`, args);
   }
 }
 

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -59,9 +60,13 @@ class MusicService:
     def _search_youtube_sync(self, query: str) -> TrackInfo | None:
         """Synchronous YouTube search via yt-dlp."""
         try:
-            # Use yt-dlp to search and extract audio URL
+            # Find yt-dlp — check venv first, then system PATH
+            import shutil
+            venv_ytdlp = os.path.join(os.path.dirname(sys.executable), "yt-dlp")
+            ytdlp_bin = venv_ytdlp if os.path.exists(venv_ytdlp) else (shutil.which("yt-dlp") or "yt-dlp")
+
             cmd = [
-                "yt-dlp",
+                ytdlp_bin,
                 "--no-download",
                 "--print", "%(title)s",
                 "--print", "%(url)s",
@@ -70,11 +75,12 @@ class MusicService:
                 "--no-playlist",
                 f"ytsearch1:{query}",
             ]
+            logger.info(f"Running: {' '.join(cmd[:3])}... ytsearch1:{query}")
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=30,
             )
 
             if result.returncode != 0:
