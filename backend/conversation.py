@@ -78,15 +78,30 @@ class Conversation:
                 await self._send({"type": "cancel"})
 
         elif event.kind == "speech_end" and event.audio:
+            # Skip very short audio (likely noise, not speech)
+            # 16-bit PCM at 16kHz = 32000 bytes/sec, so 16000 bytes = 0.5s
+            if len(event.audio) < 8000:  # less than 0.25s
+                logger.debug(f"Skipping short audio: {len(event.audio)} bytes")
+                return
+
             # Transcribe the speech
             await self._send({"type": "status", "state": "transcribing"})
             result = await self.stt.transcribe(event.audio)
 
-            if not result.text.strip():
+            text = result.text.strip()
+            # Filter out noise/garbage transcripts
+            if not text or len(text) < 2:
+                return
+            # Common Whisper hallucinations on noise
+            noise_phrases = {"you", "yeah", "mm", "hmm", "uh", "um", "oh", "ah",
+                             "thank you.", "thanks for watching.", "bye.",
+                             "subscribe.", "like and subscribe."}
+            if text.lower().rstrip(".!,") in noise_phrases:
+                logger.debug(f"Filtered noise transcript: {text}")
                 return
 
-            logger.info(f"Transcript: {result.text}")
-            await self._send({"type": "final_transcript", "text": result.text})
+            logger.info(f"Transcript: {text}")
+            await self._send({"type": "final_transcript", "text": text})
 
             # Start a new turn
             self._current_turn_task = asyncio.create_task(
@@ -106,9 +121,48 @@ class Conversation:
         if self.on_turn_complete:
             await self.on_turn_complete()
 
+    def _repair_history(self):
+        """Ensure conversation history is valid for the API.
+
+        Every assistant message with tool_calls must be followed by
+        matching tool_result messages. If not, add placeholder results.
+        """
+        repaired = False
+        i = 0
+        while i < len(self.messages):
+            msg = self.messages[i]
+            if msg.role == "assistant" and msg.tool_calls:
+                # Check that every tool_call has a matching tool_result after it
+                needed_ids = {tc["id"] for tc in msg.tool_calls}
+                found_ids = set()
+                j = i + 1
+                while j < len(self.messages) and self.messages[j].role == "tool":
+                    if self.messages[j].tool_call_id in needed_ids:
+                        found_ids.add(self.messages[j].tool_call_id)
+                    j += 1
+
+                missing = needed_ids - found_ids
+                if missing:
+                    # Insert placeholder tool results for missing ones
+                    insert_at = i + 1
+                    for tc in msg.tool_calls:
+                        if tc["id"] in missing:
+                            self.messages.insert(insert_at, Message(
+                                role="tool",
+                                content="[cancelled]",
+                                tool_call_id=tc["id"],
+                            ))
+                            insert_at += 1
+                    repaired = True
+                    logger.warning(f"Repaired history: added {len(missing)} missing tool_result(s)")
+            i += 1
+        return repaired
+
     async def _run_llm_turn(self):
         """Run LLM and handle response (may recurse for tool calls)."""
-        # Stream LLM response
+        # Repair history before each LLM call
+        self._repair_history()
+
         full_text = ""
         sentence_buffer = ""
         pending_tool_calls = []
@@ -150,7 +204,7 @@ class Conversation:
             if remaining and not self._cancel_event.is_set():
                 sentences_to_speak.append(remaining)
 
-            # Speak all sentences sequentially (not concurrently)
+            # Speak all sentences sequentially
             for sentence in sentences_to_speak:
                 if self._cancel_event.is_set():
                     break
@@ -168,15 +222,22 @@ class Conversation:
                 )
                 self.messages.append(msg)
 
-            # Handle tool calls
+            # Handle tool calls — always add results for ALL tool calls
+            # even if cancelled, to keep history valid
             if pending_tool_calls and self.tool_handler:
                 for tc in pending_tool_calls:
-                    if self._cancel_event.is_set():
-                        break
-
                     tool_args = json.loads(tc.arguments)
 
-                    # Execute tool (may resolve URLs etc)
+                    if self._cancel_event.is_set():
+                        # Cancelled — add placeholder result
+                        self.messages.append(Message(
+                            role="tool",
+                            content="[cancelled by user]",
+                            tool_call_id=tc.id,
+                        ))
+                        continue
+
+                    # Execute tool
                     try:
                         result = await self.tool_handler(tc.name, tool_args)
                     except Exception as e:
@@ -188,7 +249,6 @@ class Conversation:
                         "name": tc.name,
                         "args": tool_args,
                     }
-                    # Include resolved music URL if available
                     if "_resolved" in tool_args:
                         event_data["resolved"] = tool_args.pop("_resolved")
                     await self._send(event_data)
@@ -205,8 +265,13 @@ class Conversation:
 
         except asyncio.CancelledError:
             logger.info("Turn cancelled (barge-in)")
+            # Repair history in case we were mid-tool-call
+            self._repair_history()
         except Exception as e:
             logger.error(f"Error in turn: {e}", exc_info=True)
+            # Try to repair and recover
+            if self._repair_history():
+                logger.info("History repaired after error")
             await self._send({"type": "error", "message": str(e)})
 
     async def _speak_sentence(self, text: str):
