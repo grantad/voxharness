@@ -15,20 +15,11 @@ android {
         versionCode = 1
         versionName = "0.1.0"
 
-        // API keys from local.properties (not committed)
-        val localProps = rootProject.file("local.properties")
-        if (localProps.exists()) {
-            val props = java.util.Properties().apply { load(localProps.inputStream()) }
-            buildConfigField("String", "ANTHROPIC_API_KEY", "\"${props.getProperty("anthropic.api.key", "")}\"")
-            buildConfigField("String", "OPENAI_API_KEY", "\"${props.getProperty("openai.api.key", "")}\"")
-            buildConfigField("String", "ELEVENLABS_API_KEY", "\"${props.getProperty("elevenlabs.api.key", "")}\"")
-            buildConfigField("String", "ELEVENLABS_VOICE_ID", "\"${props.getProperty("elevenlabs.voice.id", "21m00Tcm4TlvDq8ikWAM")}\"")
-        } else {
-            buildConfigField("String", "ANTHROPIC_API_KEY", "\"\"")
-            buildConfigField("String", "OPENAI_API_KEY", "\"\"")
-            buildConfigField("String", "ELEVENLABS_API_KEY", "\"\"")
-            buildConfigField("String", "ELEVENLABS_VOICE_ID", "\"21m00Tcm4TlvDq8ikWAM\"")
-        }
+        // API keys — read from gradle.properties or environment
+        buildConfigField("String", "ANTHROPIC_API_KEY", "\"${findProperty("anthropic.api.key") ?: System.getenv("ANTHROPIC_API_KEY") ?: ""}\"")
+        buildConfigField("String", "OPENAI_API_KEY", "\"${findProperty("openai.api.key") ?: System.getenv("OPENAI_API_KEY") ?: ""}\"")
+        buildConfigField("String", "ELEVENLABS_API_KEY", "\"${findProperty("elevenlabs.api.key") ?: System.getenv("ELEVENLABS_API_KEY") ?: ""}\"")
+        buildConfigField("String", "ELEVENLABS_VOICE_ID", "\"${findProperty("elevenlabs.voice.id") ?: "21m00Tcm4TlvDq8ikWAM"}\"")
     }
 
     buildFeatures {
