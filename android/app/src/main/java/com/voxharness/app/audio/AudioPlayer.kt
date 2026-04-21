@@ -1,89 +1,90 @@
 package com.voxharness.app.audio
 
 import android.content.Context
-import android.media.AudioAttributes
-import android.media.AudioFormat
-import android.media.AudioTrack
 import android.util.Log
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.*
 
 /**
- * Handles TTS audio playback (raw PCM/MP3) and music streaming.
+ * Handles TTS audio playback (MP3) and music streaming.
+ * TTS playback suspends until audio finishes playing.
  */
 class AudioPlayer(private val context: Context) {
 
     companion object {
         private const val TAG = "AudioPlayer"
-        private const val TTS_SAMPLE_RATE = 44100
     }
 
-    // ExoPlayer for music (supports streaming URLs)
     private var musicPlayer: ExoPlayer? = null
+    private var ttsPlayer: ExoPlayer? = null
 
-    // AudioTrack for TTS PCM playback
-    private var ttsTrack: AudioTrack? = null
-    private val ttsChunks = mutableListOf<ByteArray>()
-    private var ttsJob: Job? = null
+    /**
+     * Play MP3 audio data and suspend until playback completes.
+     */
+    suspend fun playTTSAudio(mp3Data: ByteArray) {
+        if (mp3Data.isEmpty()) return
 
-    // --- TTS Playback ---
+        cancelTTS()
 
-    fun queueTTSChunk(mp3Data: ByteArray) {
-        ttsChunks.add(mp3Data)
-    }
+        val done = CompletableDeferred<Unit>()
 
-    fun playTTS(scope: CoroutineScope) {
-        if (ttsChunks.isEmpty()) return
+        withContext(Dispatchers.IO) {
+            val tempFile = java.io.File.createTempFile("tts_", ".mp3", context.cacheDir)
+            tempFile.writeBytes(mp3Data)
 
-        // Combine all chunks into one buffer
-        val totalSize = ttsChunks.sumOf { it.size }
-        val combined = ByteArray(totalSize)
-        var offset = 0
-        for (chunk in ttsChunks) {
-            chunk.copyInto(combined, offset)
-            offset += chunk.size
-        }
-        ttsChunks.clear()
+            withContext(Dispatchers.Main) {
+                val player = ExoPlayer.Builder(context).build()
+                ttsPlayer = player
 
-        // Decode and play using Android's MediaPlayer via temp file
-        ttsJob = scope.launch(Dispatchers.IO) {
-            try {
-                val tempFile = java.io.File.createTempFile("tts_", ".mp3", context.cacheDir)
-                tempFile.writeBytes(combined)
-
-                withContext(Dispatchers.Main) {
-                    val player = ExoPlayer.Builder(context).build()
-                    player.setMediaItem(MediaItem.fromUri(android.net.Uri.fromFile(tempFile)))
-                    player.prepare()
-                    player.play()
-
-                    // Wait for completion
-                    player.addListener(object : androidx.media3.common.Player.Listener {
-                        override fun onPlaybackStateChanged(state: Int) {
-                            if (state == androidx.media3.common.Player.STATE_ENDED) {
-                                player.release()
-                                tempFile.delete()
-                            }
+                player.addListener(object : Player.Listener {
+                    override fun onPlaybackStateChanged(state: Int) {
+                        if (state == Player.STATE_ENDED || state == Player.STATE_IDLE) {
+                            player.release()
+                            if (ttsPlayer === player) ttsPlayer = null
+                            tempFile.delete()
+                            done.complete(Unit)
                         }
-                    })
+                    }
+                })
+
+                player.setMediaItem(MediaItem.fromUri(android.net.Uri.fromFile(tempFile)))
+                player.prepare()
+                player.play()
+                Log.i(TAG, "TTS playing: ${mp3Data.size} bytes")
+            }
+
+            try {
+                done.await()
+            } catch (e: CancellationException) {
+                withContext(Dispatchers.Main + NonCancellable) {
+                    ttsPlayer?.let {
+                        it.stop()
+                        it.release()
+                        ttsPlayer = null
+                    }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "TTS playback error", e)
+                tempFile.delete()
+                throw e
             }
         }
     }
 
     fun cancelTTS() {
-        ttsChunks.clear()
-        ttsJob?.cancel()
+        ttsPlayer?.let {
+            try {
+                it.stop()
+                it.release()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error cancelling TTS", e)
+            }
+        }
+        ttsPlayer = null
     }
-
-    // --- Music Playback ---
 
     fun playMusic(url: String, volume: Float = 0.7f) {
         stopMusic()
-
         musicPlayer = ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.fromUri(url))
             this.volume = volume

@@ -195,6 +195,20 @@ object DeviceTools {
             )
         ),
         ToolDef(
+            name = "play_youtube",
+            description = "Search and play a specific YouTube video. Use this when the user asks to play, watch, or show a YouTube video.",
+            parameters = mapOf(
+                "type" to "object",
+                "properties" to mapOf(
+                    "query" to mapOf(
+                        "type" to "string",
+                        "description" to "Video title, topic, or search query to find and play on YouTube"
+                    )
+                ),
+                "required" to listOf("query")
+            )
+        ),
+        ToolDef(
             name = "show_notification",
             description = "Display a notification on the phone with a title and message.",
             parameters = mapOf(
@@ -344,12 +358,28 @@ object DeviceTools {
 
             "play_music" -> {
                 val query = (args["query"] as? String) ?: "music"
-                // Try YouTube Music first, fall back to YouTube
+                // Open YouTube Music search, fall back to YouTube
+                val intent = try {
+                    Intent(Intent.ACTION_SEARCH).apply {
+                        setPackage("com.google.android.apps.youtube.music")
+                        putExtra("query", query)
+                    }
+                } catch (e: Exception) {
+                    Intent(Intent.ACTION_VIEW,
+                        Uri.parse("https://music.youtube.com/search?q=${Uri.encode(query)}"))
+                }
+                "Playing: $query" to intent
+            }
+
+            "play_youtube" -> {
+                val query = (args["query"] as? String) ?: ""
+                // Use YouTube's search intent to find and play the video
                 val intent = Intent(Intent.ACTION_SEARCH).apply {
                     setPackage("com.google.android.youtube")
                     putExtra("query", query)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 }
-                "Playing: $query" to intent
+                "Playing on YouTube: $query" to intent
             }
 
             "show_notification" -> {

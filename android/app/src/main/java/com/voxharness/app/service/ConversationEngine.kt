@@ -45,6 +45,7 @@ class ConversationEngine(private val context: Context) {
             TOOL RULES:
             - Use tools directly when asked to do something on the phone.
             - For multi-step tasks, chain tool calls, then report the result.
+            - For YouTube: use play_youtube with the video title or topic.
         """.trimIndent()
     }
 
@@ -63,11 +64,13 @@ class ConversationEngine(private val context: Context) {
     private val _state = MutableStateFlow(ConversationState())
     val state: StateFlow<ConversationState> = _state.asStateFlow()
 
-    // Intent launcher — set by Activity
     var intentLauncher: ((Intent) -> Unit)? = null
 
     private val messageHistory = mutableListOf<Message>()
     private val allTools = DeviceTools.TOOLS
+
+    // Track current turn so we can cancel it on new input
+    private var currentTurnJob: Job? = null
 
     fun start() {
         Log.i(TAG, "Starting conversation engine")
@@ -87,11 +90,9 @@ class ConversationEngine(private val context: Context) {
 
         recognizer.onTranscript = { text ->
             Log.i(TAG, "Command: $text")
-            scope.launch { processTurn(text) }
-        }
-
-        recognizer.onError = { error ->
-            Log.e(TAG, "Recognizer error: $error")
+            // Cancel any in-progress turn (prevents stale responses)
+            cancelCurrentTurn()
+            currentTurnJob = scope.launch { processTurn(text) }
         }
 
         recognizer.start()
@@ -99,13 +100,21 @@ class ConversationEngine(private val context: Context) {
     }
 
     fun stop() {
+        cancelCurrentTurn()
         recognizer.stop()
         audioPlayer.release()
         scope.cancel()
     }
 
     fun sendTextInput(text: String) {
-        scope.launch { processTurn(text) }
+        cancelCurrentTurn()
+        currentTurnJob = scope.launch { processTurn(text) }
+    }
+
+    private fun cancelCurrentTurn() {
+        currentTurnJob?.cancel()
+        currentTurnJob = null
+        audioPlayer.cancelTTS()
     }
 
     private suspend fun processTurn(userText: String) {
@@ -122,17 +131,24 @@ class ConversationEngine(private val context: Context) {
         try {
             val response = streamLlmResponse()
 
-            // Speak the response
+            // Speak the response sentence by sentence, waiting for each to finish
             if (response.isNotEmpty()) {
                 _state.update { it.copy(status = Status.SPEAKING) }
                 speakText(response)
             }
 
-            // After speaking, stay in command mode for follow-ups
+            // After speaking completes, go back to listening
+            _state.update { it.copy(status = Status.LISTENING) }
             recognizer.enterCommandMode()
 
+        } catch (e: CancellationException) {
+            Log.i(TAG, "Turn cancelled")
+            // Add placeholder tool results for any pending tool calls
+            repairHistory()
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Turn error", e)
+            repairHistory()
             _state.update {
                 it.copy(
                     status = Status.LISTENING,
@@ -171,7 +187,6 @@ class ConversationEngine(private val context: Context) {
             toolCalls = pendingToolCalls.ifEmpty { null },
         ))
 
-        // Update UI with final response
         if (fullText.isNotEmpty()) {
             _state.update {
                 it.copy(
@@ -194,7 +209,6 @@ class ConversationEngine(private val context: Context) {
                 Log.i(TAG, "Tool call: ${tc.name} args=$args")
                 val (result, intent) = DeviceTools.handleTool(context, tc.name, args)
 
-                // Launch intent if provided
                 if (intent != null) {
                     withContext(Dispatchers.Main) {
                         try {
@@ -206,12 +220,10 @@ class ConversationEngine(private val context: Context) {
                     }
                 }
 
-                // Add tool call status to UI
                 _state.update {
                     it.copy(messages = it.messages + ChatMessage("assistant", "→ ${tc.name}: $result"))
                 }
 
-                // Add tool result to history
                 messageHistory.add(Message(
                     role = "tool",
                     content = result,
@@ -227,13 +239,49 @@ class ConversationEngine(private val context: Context) {
     }
 
     private suspend fun speakText(text: String) {
-        // Split into sentences for sequential TTS
         val sentences = text.split(Regex("(?<=[.!?])\\s+")).filter { it.isNotBlank() }
 
         for (sentence in sentences) {
+            // Check for cancellation between sentences
+            currentCoroutineContext().ensureActive()
+
             val audio = tts.synthesize(sentence) ?: continue
-            audioPlayer.queueTTSChunk(audio)
+            // This suspends until playback completes
+            audioPlayer.playTTSAudio(audio)
         }
-        audioPlayer.playTTS(scope)
+    }
+
+    /**
+     * Repair message history — ensure every tool_use has a tool_result.
+     */
+    private fun repairHistory() {
+        val clean = mutableListOf<Message>()
+        var i = 0
+        while (i < messageHistory.size) {
+            val msg = messageHistory[i]
+            clean.add(msg)
+
+            if (msg.role == "assistant" && msg.toolCalls != null) {
+                val neededIds = msg.toolCalls.map { it.id }.toMutableSet()
+                i++
+                // Collect existing tool results
+                while (i < messageHistory.size && messageHistory[i].role == "tool") {
+                    val toolMsg = messageHistory[i]
+                    if (toolMsg.toolCallId in neededIds) {
+                        clean.add(toolMsg)
+                        neededIds.remove(toolMsg.toolCallId)
+                    }
+                    i++
+                }
+                // Add placeholders for missing
+                for (id in neededIds) {
+                    clean.add(Message(role = "tool", content = "[cancelled]", toolCallId = id))
+                }
+                continue
+            }
+            i++
+        }
+        messageHistory.clear()
+        messageHistory.addAll(clean)
     }
 }

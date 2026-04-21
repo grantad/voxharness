@@ -25,6 +25,7 @@ android/.gradle/
 android/build/
 android/app/build/
 android/local.properties
+android/gradle.properties
 android/captures/
 *.apk
 *.aab
