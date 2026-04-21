@@ -43,6 +43,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         engine = ConversationEngine(this)
+        engine.intentLauncher = { intent -> startActivity(intent) }
 
         setContent {
             VoxHarnessTheme {
@@ -135,14 +136,14 @@ fun VoxHarnessScreen(engine: ConversationEngine) {
             }
 
             // Status text
-            if (state.status != Status.IDLE) {
+            if (true) {
                 Text(
                     text = when (state.status) {
+                        Status.WAITING_FOR_WAKE_WORD -> "Say \"Computer\" to start..."
                         Status.LISTENING -> "Listening..."
                         Status.TRANSCRIBING -> "Transcribing..."
                         Status.THINKING -> "Thinking..."
                         Status.SPEAKING -> "Speaking..."
-                        else -> ""
                     },
                     color = MaterialTheme.colorScheme.primary,
                     fontSize = 13.sp,
@@ -246,7 +247,7 @@ fun MessageBubble(message: ChatMessage) {
 @Composable
 fun StatusIndicator(status: Status) {
     val color = when (status) {
-        Status.IDLE -> Color(0xFF8888A0)
+        Status.WAITING_FOR_WAKE_WORD -> Color(0xFF8888A0)
         Status.LISTENING -> Color(0xFF6C5CE7)
         Status.TRANSCRIBING -> Color(0xFFFFAB40)
         Status.THINKING -> Color(0xFFFFAB40)

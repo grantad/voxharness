@@ -1,5 +1,5 @@
-# API Keys — copy to local.properties and fill in
-anthropic.api.key=sk-ant-...
-openai.api.key=sk-...
-elevenlabs.api.key=...
+# API Keys — copy to local.properties and fill in your keys
+anthropic.api.key=YOUR_KEY_HERE
+openai.api.key=YOUR_KEY_HERE
+elevenlabs.api.key=YOUR_KEY_HERE
 elevenlabs.voice.id=21m00Tcm4TlvDq8ikWAM

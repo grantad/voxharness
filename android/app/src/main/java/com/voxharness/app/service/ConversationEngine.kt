@@ -1,35 +1,29 @@
 package com.voxharness.app.service
 
 import android.content.Context
+import android.content.Intent
 import android.util.Log
 import com.voxharness.app.BuildConfig
-import com.voxharness.app.audio.AudioCapture
 import com.voxharness.app.audio.AudioPlayer
 import com.voxharness.app.llm.*
-import com.voxharness.app.voice.SpeechToText
+import com.voxharness.app.voice.ContinuousRecognizer
 import com.voxharness.app.voice.TextToSpeech
-import com.voxharness.app.voice.VadDetector
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
-
-/**
- * The conversation engine orchestrates the full voice loop:
- * Mic -> VAD -> STT -> LLM -> TTS -> Speaker
- */
+import org.json.JSONObject
 
 data class ConversationState(
-    val status: Status = Status.IDLE,
+    val status: Status = Status.WAITING_FOR_WAKE_WORD,
     val messages: List<ChatMessage> = emptyList(),
-    val currentTranscript: String = "",
     val currentResponse: String = "",
 )
 
 enum class Status {
-    IDLE, LISTENING, TRANSCRIBING, THINKING, SPEAKING
+    WAITING_FOR_WAKE_WORD, LISTENING, TRANSCRIBING, THINKING, SPEAKING
 }
 
 data class ChatMessage(
-    val role: String, // "user" or "assistant"
+    val role: String,
     val content: String,
 )
 
@@ -39,19 +33,25 @@ class ConversationEngine(private val context: Context) {
         private const val TAG = "ConversationEngine"
         private val SYSTEM_PROMPT = """
             You are a voice-controlled AI assistant on an Android phone.
-            Keep responses to 1-2 short sentences. Be terse.
-            Do NOT narrate what you're about to do. Just do it, then briefly confirm.
-            Summarize information briefly — never read raw data aloud.
+            You have full access to the phone's features: camera, maps, apps,
+            files, settings, calls, messages, alarms, music, and more.
+
+            VOICE RULES:
+            - Keep responses to 1-2 short sentences. Be terse.
+            - Don't narrate plans. Just do it, then briefly confirm.
+            - Don't ask clarifying questions unless truly ambiguous.
+            - Summarize results briefly — never read raw data aloud.
+
+            TOOL RULES:
+            - Use tools directly when asked to do something on the phone.
+            - For multi-step tasks, chain tool calls, then report the result.
         """.trimIndent()
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-    // Components
-    val audioCapture = AudioCapture(context)
+    private val recognizer = ContinuousRecognizer(context)
     private val audioPlayer = AudioPlayer(context)
-    private val vad = VadDetector(context)
-    private val stt = SpeechToText(context)
     private val tts = TextToSpeech(
         apiKey = BuildConfig.ELEVENLABS_API_KEY,
         voiceId = BuildConfig.ELEVENLABS_VOICE_ID,
@@ -60,164 +60,180 @@ class ConversationEngine(private val context: Context) {
         apiKey = BuildConfig.ANTHROPIC_API_KEY,
     )
 
-    // State
     private val _state = MutableStateFlow(ConversationState())
     val state: StateFlow<ConversationState> = _state.asStateFlow()
 
+    // Intent launcher — set by Activity
+    var intentLauncher: ((Intent) -> Unit)? = null
+
     private val messageHistory = mutableListOf<Message>()
+    private val allTools = DeviceTools.TOOLS
 
     fun start() {
         Log.i(TAG, "Starting conversation engine")
 
-        // Load VAD model
-        scope.launch(Dispatchers.IO) {
-            try {
-                vad.load()
-                Log.i(TAG, "VAD loaded")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to load VAD", e)
-            }
-        }
+        recognizer.wakeWord = "computer"
 
-        // Set up VAD callbacks
-        vad.onSpeechStart = {
-            Log.i(TAG, "Speech start detected")
+        recognizer.onWakeWordDetected = {
+            Log.i(TAG, "Wake word detected!")
             _state.update { it.copy(status = Status.LISTENING) }
         }
 
-        vad.onSpeechEnd = { audio ->
-            Log.i(TAG, "Speech end detected: ${audio.size} samples")
-            scope.launch { processVoiceInput() }
-        }
-
-        // Connect audio capture to VAD
-        scope.launch {
-            audioCapture.audioFrames.collect { frame ->
-                vad.feed(frame)
+        recognizer.onListeningStateChanged = { listening ->
+            if (!listening) {
+                _state.update { it.copy(status = Status.WAITING_FOR_WAKE_WORD) }
             }
         }
 
-        // Start mic capture
-        audioCapture.start(scope)
-        _state.update { it.copy(status = Status.IDLE) }
+        recognizer.onTranscript = { text ->
+            Log.i(TAG, "Command: $text")
+            scope.launch { processTurn(text) }
+        }
+
+        recognizer.onError = { error ->
+            Log.e(TAG, "Recognizer error: $error")
+        }
+
+        recognizer.start()
+        _state.update { it.copy(status = Status.WAITING_FOR_WAKE_WORD) }
     }
 
     fun stop() {
-        audioCapture.stop()
+        recognizer.stop()
         audioPlayer.release()
-        vad.release()
         scope.cancel()
-    }
-
-    fun pushToTalkStart() {
-        if (!audioCapture.isCapturing) {
-            audioCapture.start(scope)
-        }
-        _state.update { it.copy(status = Status.LISTENING) }
-    }
-
-    fun pushToTalkEnd() {
-        vad.flush()
     }
 
     fun sendTextInput(text: String) {
         scope.launch { processTurn(text) }
     }
 
-    private suspend fun processVoiceInput() {
-        _state.update { it.copy(status = Status.TRANSCRIBING) }
-
-        // Use Android's speech recognizer
-        withContext(Dispatchers.Main) {
-            val transcript = stt.transcribeFromMic()
-            if (transcript.isNullOrBlank()) {
-                _state.update { it.copy(status = Status.IDLE) }
-                return@withContext
-            }
-            processTurn(transcript)
-        }
-    }
-
     private suspend fun processTurn(userText: String) {
-        // Add user message
         val userMsg = ChatMessage("user", userText)
         _state.update {
             it.copy(
                 status = Status.THINKING,
                 messages = it.messages + userMsg,
-                currentTranscript = userText,
                 currentResponse = "",
             )
         }
         messageHistory.add(Message(role = "user", content = userText))
 
-        // Stream LLM response
-        var fullResponse = ""
-        val sentenceBuffer = StringBuilder()
-        val sentences = mutableListOf<String>()
-
         try {
-            llm.streamChat(
-                messages = messageHistory,
-                system = SYSTEM_PROMPT,
-            ).collect { delta ->
-                when (delta) {
-                    is StreamDelta.Text -> {
-                        fullResponse += delta.text
-                        sentenceBuffer.append(delta.text)
-                        _state.update { it.copy(currentResponse = fullResponse) }
+            val response = streamLlmResponse()
 
-                        // Check for sentence boundaries
-                        val text = sentenceBuffer.toString()
-                        val parts = text.split(Regex("(?<=[.!?])\\s+"))
-                        if (parts.size > 1) {
-                            for (i in 0 until parts.size - 1) {
-                                val s = parts[i].trim()
-                                if (s.isNotEmpty()) sentences.add(s)
-                            }
-                            sentenceBuffer.clear()
-                            sentenceBuffer.append(parts.last())
-                        }
-                    }
-                    is StreamDelta.Tool -> {
-                        // TODO: Handle tool calls
-                        Log.i(TAG, "Tool call: ${delta.toolCall.name}")
-                    }
-                    is StreamDelta.Done -> {}
-                }
+            // Speak the response
+            if (response.isNotEmpty()) {
+                _state.update { it.copy(status = Status.SPEAKING) }
+                speakText(response)
             }
 
-            // Add remaining text
-            val remaining = sentenceBuffer.toString().trim()
-            if (remaining.isNotEmpty()) sentences.add(remaining)
-
-            // Add to history
-            messageHistory.add(Message(role = "assistant", content = fullResponse))
-            _state.update {
-                it.copy(
-                    messages = it.messages + ChatMessage("assistant", fullResponse),
-                    currentResponse = "",
-                )
-            }
-
-            // Speak sentences
-            _state.update { it.copy(status = Status.SPEAKING) }
-            for (sentence in sentences) {
-                val audio = tts.synthesize(sentence) ?: continue
-                audioPlayer.queueTTSChunk(audio)
-            }
-            audioPlayer.playTTS(scope)
+            // After speaking, stay in command mode for follow-ups
+            recognizer.enterCommandMode()
 
         } catch (e: Exception) {
             Log.e(TAG, "Turn error", e)
             _state.update {
                 it.copy(
-                    status = Status.IDLE,
+                    status = Status.LISTENING,
                     messages = it.messages + ChatMessage("assistant", "Error: ${e.message}"),
+                )
+            }
+            recognizer.enterCommandMode()
+        }
+    }
+
+    private suspend fun streamLlmResponse(): String {
+        var fullText = ""
+        val pendingToolCalls = mutableListOf<ToolCall>()
+
+        llm.streamChat(
+            messages = messageHistory,
+            system = SYSTEM_PROMPT,
+            tools = allTools,
+        ).collect { delta ->
+            when (delta) {
+                is StreamDelta.Text -> {
+                    fullText += delta.text
+                    _state.update { it.copy(currentResponse = fullText) }
+                }
+                is StreamDelta.Tool -> {
+                    pendingToolCalls.add(delta.toolCall)
+                }
+                is StreamDelta.Done -> {}
+            }
+        }
+
+        // Add assistant message to history
+        messageHistory.add(Message(
+            role = "assistant",
+            content = fullText,
+            toolCalls = pendingToolCalls.ifEmpty { null },
+        ))
+
+        // Update UI with final response
+        if (fullText.isNotEmpty()) {
+            _state.update {
+                it.copy(
+                    messages = it.messages + ChatMessage("assistant", fullText),
+                    currentResponse = "",
                 )
             }
         }
 
-        _state.update { it.copy(status = Status.IDLE) }
+        // Handle tool calls
+        if (pendingToolCalls.isNotEmpty()) {
+            for (tc in pendingToolCalls) {
+                val args = try {
+                    val json = JSONObject(tc.arguments)
+                    json.keys().asSequence().associateWith { json.get(it) }
+                } catch (e: Exception) {
+                    emptyMap()
+                }
+
+                Log.i(TAG, "Tool call: ${tc.name} args=$args")
+                val (result, intent) = DeviceTools.handleTool(context, tc.name, args)
+
+                // Launch intent if provided
+                if (intent != null) {
+                    withContext(Dispatchers.Main) {
+                        try {
+                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            intentLauncher?.invoke(intent) ?: context.startActivity(intent)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to launch intent", e)
+                        }
+                    }
+                }
+
+                // Add tool call status to UI
+                _state.update {
+                    it.copy(messages = it.messages + ChatMessage("assistant", "→ ${tc.name}: $result"))
+                }
+
+                // Add tool result to history
+                messageHistory.add(Message(
+                    role = "tool",
+                    content = result,
+                    toolCallId = tc.id,
+                ))
+            }
+
+            // Continue conversation with tool results
+            return streamLlmResponse()
+        }
+
+        return fullText
+    }
+
+    private suspend fun speakText(text: String) {
+        // Split into sentences for sequential TTS
+        val sentences = text.split(Regex("(?<=[.!?])\\s+")).filter { it.isNotBlank() }
+
+        for (sentence in sentences) {
+            val audio = tts.synthesize(sentence) ?: continue
+            audioPlayer.queueTTSChunk(audio)
+        }
+        audioPlayer.playTTS(scope)
     }
 }
