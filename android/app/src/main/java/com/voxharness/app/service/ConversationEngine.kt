@@ -106,6 +106,15 @@ class ConversationEngine(private val context: Context) {
         scope.cancel()
     }
 
+    /**
+     * Called when the user returns to VoxHarness from another app.
+     * Resumes voice recognition.
+     */
+    fun onResume() {
+        recognizer.resume()
+        _state.update { it.copy(status = Status.WAITING_FOR_WAKE_WORD) }
+    }
+
     fun sendTextInput(text: String) {
         cancelCurrentTurn()
         currentTurnJob = scope.launch { processTurn(text) }
@@ -210,12 +219,15 @@ class ConversationEngine(private val context: Context) {
                 val (result, intent) = DeviceTools.handleTool(context, tc.name, args)
 
                 if (intent != null) {
+                    // Pause recognition so we don't steal audio focus from the launched app
+                    recognizer.pause()
                     withContext(Dispatchers.Main) {
                         try {
                             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             intentLauncher?.invoke(intent) ?: context.startActivity(intent)
                         } catch (e: Exception) {
                             Log.e(TAG, "Failed to launch intent", e)
+                            recognizer.resume()
                         }
                     }
                 }

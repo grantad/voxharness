@@ -61,6 +61,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (::engine.isInitialized) {
+            engine.onResume()
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         engine.stop()

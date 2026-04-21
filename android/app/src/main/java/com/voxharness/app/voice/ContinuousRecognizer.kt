@@ -39,15 +39,19 @@ class ContinuousRecognizer(private val context: Context) {
     var onListeningStateChanged: ((Boolean) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
 
+    private var isPaused = false
+
     fun start() {
         if (isRunning) return
         isRunning = true
+        isPaused = false
         Log.i(TAG, "Starting continuous recognition, wake word: '$wakeWord'")
         startListening()
     }
 
     fun stop() {
         isRunning = false
+        isPaused = false
         isListeningForCommand = false
         cancelCommandTimeout()
         handler.removeCallbacksAndMessages(null)
@@ -55,6 +59,30 @@ class ContinuousRecognizer(private val context: Context) {
         recognizer?.destroy()
         recognizer = null
         Log.i(TAG, "Stopped")
+    }
+
+    /**
+     * Pause recognition — stops the mic so other apps (YouTube, etc.) can use audio.
+     * Call resume() when the user returns to VoxHarness.
+     */
+    fun pause() {
+        if (!isRunning || isPaused) return
+        isPaused = true
+        handler.removeCallbacksAndMessages(null)
+        recognizer?.cancel()
+        recognizer?.destroy()
+        recognizer = null
+        Log.i(TAG, "Paused (external app launched)")
+    }
+
+    /**
+     * Resume recognition after a pause.
+     */
+    fun resume() {
+        if (!isRunning || !isPaused) return
+        isPaused = false
+        Log.i(TAG, "Resuming recognition")
+        startListening()
     }
 
     /**
@@ -74,7 +102,7 @@ class ContinuousRecognizer(private val context: Context) {
     }
 
     private fun startListening() {
-        if (!isRunning) return
+        if (!isRunning || isPaused) return
 
         handler.post {
             try {
@@ -102,7 +130,7 @@ class ContinuousRecognizer(private val context: Context) {
     }
 
     private fun scheduleRestart() {
-        if (!isRunning) return
+        if (!isRunning || isPaused) return
         handler.postDelayed({ startListening() }, RESTART_DELAY_MS)
     }
 
