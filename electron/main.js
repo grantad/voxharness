@@ -48,6 +48,7 @@ function createWindow() {
     height: 700,
     title: 'VoxHarness',
     backgroundColor: '#0a0a0f',
+    icon: path.join(__dirname, 'renderer', 'assets', 'icons', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
